@@ -6,6 +6,7 @@ import Link from "next/link";
 import { doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { recordBall, undoLastBall } from "@/lib/firebase/scoring";
+import { switchToSecondInnings } from "@/lib/firebase/matches";
 import type { Match, PlayerStatsState } from "@/types/cricket";
 import { WicketType, ExtraType } from "@/types/cricket";
 import BowlerStatsSidebar from "@/components/match/BowlerStatsSidebar";
@@ -50,6 +51,11 @@ export default function MatchScorerPage() {
   const [newBowlerId, setNewBowlerId] = useState("");
   const [isUpdatingBowler, setIsUpdatingBowler] = useState(false);
   const [showBowlerSelector, setShowBowlerSelector] = useState(false);
+  const [showInningsSwitch, setShowInningsSwitch] = useState(false);
+  const [secondInningsStrikerId, setSecondInningsStrikerId] = useState("");
+  const [secondInningsNonStrikerId, setSecondInningsNonStrikerId] = useState("");
+  const [secondInningsBowlerId, setSecondInningsBowlerId] = useState("");
+  const [isSwitchingInnings, setIsSwitchingInnings] = useState(false);
   const prevScoreRef = useRef<{ overs: number; balls: number } | null>(null);
   const justSelectedBowlerRef = useRef(false);
 
@@ -125,7 +131,12 @@ export default function MatchScorerPage() {
       !justSelectedBowlerRef.current &&
       liveState.bowler_id === liveState.last_bowler_id;
 
-    if ((overJustCompleted || isInOverCompletionState) && liveState?.bowler_id && !showBowlerSelector && !justSelectedBowlerRef.current) {
+    // Check if innings is complete and show switch option
+    if (inningsComplete && !showInningsSwitch && !showBowlerSelector) {
+      setShowInningsSwitch(true);
+    }
+
+    if ((overJustCompleted || isInOverCompletionState) && liveState?.bowler_id && !showBowlerSelector && !justSelectedBowlerRef.current && !inningsComplete) {
       setShowBowlerSelector(true);
     }
 
@@ -159,6 +170,14 @@ export default function MatchScorerPage() {
     ? resolveTeam(match.teams, liveState?.bowling_team_id)
     : null;
 
+  // Get teams for second innings (swapped) - defined early so they're available in JSX
+  const secondInningsBattingTeam = match
+    ? resolveTeam(match.teams, liveState?.bowling_team_id)
+    : null;
+  const secondInningsBowlingTeam = match
+    ? resolveTeam(match.teams, liveState?.batting_team_id)
+    : null;
+
   const striker =
     battingTeam?.players.find((p) => p.id === liveState?.striker_id) || null;
   const nonStriker =
@@ -184,6 +203,32 @@ export default function MatchScorerPage() {
     const runRate = score.runs / (totalBalls / 6);
     return runRate.toFixed(2);
   }, [score]);
+
+  // Calculate Required Run Rate (RRR) for second innings
+  const rrr = useMemo(() => {
+    // Only show RRR in second innings (when first_innings_total exists)
+    // Use == null to check for both undefined and null, but allow 0
+    if (!score || liveState?.first_innings_total == null) {
+      return null;
+    }
+    
+    const target = liveState.first_innings_total + 1; // Target to win
+    const currentScore = score.runs;
+    const runsNeeded = target - currentScore;
+    
+    // If target already achieved or exceeded, show 0.00
+    if (runsNeeded <= 0) return "0.00";
+    
+    const totalOvers = match?.config?.total_overs ?? 0;
+    const oversBowled = score.overs + score.balls / 6; // Convert to decimal overs
+    const remainingOvers = totalOvers - oversBowled;
+    
+    // If no overs remaining, return null (match should be over)
+    if (remainingOvers <= 0) return null;
+    
+    const requiredRunRate = runsNeeded / remainingOvers;
+    return requiredRunRate.toFixed(2);
+  }, [score, liveState?.first_innings_total, match?.config?.total_overs]);
 
   const handleRecordRun = async (runs: number) => {
     if (!matchId) return;
@@ -356,6 +401,32 @@ export default function MatchScorerPage() {
     }
   };
 
+  const handleSwitchInnings = async () => {
+    if (!matchId || !secondInningsStrikerId || !secondInningsNonStrikerId || !secondInningsBowlerId) {
+      setError("Please select all opening players for the second innings");
+      return;
+    }
+
+    try {
+      setIsSwitchingInnings(true);
+      setError("");
+      await switchToSecondInnings(matchId, {
+        striker_id: secondInningsStrikerId,
+        non_striker_id: secondInningsNonStrikerId,
+        bowler_id: secondInningsBowlerId,
+      });
+      setShowInningsSwitch(false);
+      setSecondInningsStrikerId("");
+      setSecondInningsNonStrikerId("");
+      setSecondInningsBowlerId("");
+    } catch (err) {
+      console.error("Switch innings error:", err);
+      setError(err instanceof Error ? err.message : "Failed to switch innings");
+    } finally {
+      setIsSwitchingInnings(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-linear-to-br from-indigo-900 via-purple-900 to-pink-900">
@@ -424,6 +495,17 @@ export default function MatchScorerPage() {
               <div className="text-6xl font-bold tracking-tight">
                 {score.runs}/{score.wickets}
               </div>
+              {liveState?.first_innings_total !== undefined && (
+                <div className="mt-2">
+                  <p className="text-white/70 text-sm">
+                    Target: <span className="font-semibold text-yellow-400">{liveState.first_innings_total + 1}</span>
+                    {" • "}
+                    Need: <span className="font-semibold text-yellow-400">
+                      {Math.max(0, liveState.first_innings_total + 1 - score.runs)}
+                    </span> runs
+                  </p>
+                </div>
+              )}
             </div>
             <div className="flex gap-6 text-white/80 text-sm mt-4 sm:mt-0">
               <div>
@@ -440,6 +522,14 @@ export default function MatchScorerPage() {
                 </p>
                 <p className="text-lg font-semibold">{crr}</p>
               </div>
+              {rrr !== null && (
+                <div>
+                  <p className="text-white/50 text-xs uppercase tracking-widest">
+                    RRR
+                  </p>
+                  <p className="text-lg font-semibold text-yellow-400">{rrr}</p>
+                </div>
+              )}
             </div>
           </div>
 
@@ -529,7 +619,7 @@ export default function MatchScorerPage() {
         )}
 
         {/* Innings Complete Message */}
-        {inningsComplete && (
+        {inningsComplete && !showInningsSwitch && (
           <div className="backdrop-blur-xl bg-gradient-to-r from-green-500/20 to-blue-500/20 rounded-3xl border border-green-400/50 p-6 text-white space-y-4">
             <div className="flex items-center gap-3">
               <svg
@@ -552,9 +642,112 @@ export default function MatchScorerPage() {
             <p className="text-white/80">
               {totalOvers} overs have been bowled. The batting team has scored {score?.runs || 0} runs for {score?.wickets || 0} wickets.
             </p>
-            <p className="text-white/60 text-sm">
-              Please switch to the next innings or end the match.
+            <p className="text-white/60 text-sm mb-4">
+              Target: {score?.runs || 0} runs
             </p>
+            <button
+              onClick={() => setShowInningsSwitch(true)}
+              className="w-full py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:shadow-lg transform hover:scale-[1.02] active:scale-[0.98] transition-all duration-200"
+            >
+              Switch to Second Innings
+            </button>
+          </div>
+        )}
+
+        {/* Second Innings Opening Players Selection */}
+        {showInningsSwitch && (
+          <div className="backdrop-blur-xl bg-white/10 rounded-3xl border border-white/20 p-6 text-white space-y-6">
+            <div>
+              <h3 className="text-xl font-semibold mb-2">Second Innings - Select Opening Players</h3>
+              <p className="text-white/70 text-sm mb-4">
+                {secondInningsBattingTeam?.name} needs to chase {score?.runs || 0} runs
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="block text-white/90 text-sm font-medium mb-2">
+                  Striker ({secondInningsBattingTeam?.name})
+                </label>
+                <select
+                  value={secondInningsStrikerId}
+                  onChange={(e) => setSecondInningsStrikerId(e.target.value)}
+                  className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-purple-400"
+                >
+                  <option value="">Choose striker</option>
+                  {secondInningsBattingTeam?.players.map((player) => (
+                    <option key={player.id} value={player.id}>
+                      {player.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-white/90 text-sm font-medium mb-2">
+                  Non-Striker ({secondInningsBattingTeam?.name})
+                </label>
+                <select
+                  value={secondInningsNonStrikerId}
+                  onChange={(e) => setSecondInningsNonStrikerId(e.target.value)}
+                  className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-purple-400"
+                >
+                  <option value="">Choose non-striker</option>
+                  {secondInningsBattingTeam?.players
+                    .filter((p) => p.id !== secondInningsStrikerId)
+                    .map((player) => (
+                      <option key={player.id} value={player.id}>
+                        {player.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-white/90 text-sm font-medium mb-2">
+                  Bowler ({secondInningsBowlingTeam?.name})
+                </label>
+                <select
+                  value={secondInningsBowlerId}
+                  onChange={(e) => setSecondInningsBowlerId(e.target.value)}
+                  className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-purple-400"
+                >
+                  <option value="">Choose bowler</option>
+                  {secondInningsBowlingTeam?.players.map((player) => (
+                    <option key={player.id} value={player.id}>
+                      {player.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  setShowInningsSwitch(false);
+                  setSecondInningsStrikerId("");
+                  setSecondInningsNonStrikerId("");
+                  setSecondInningsBowlerId("");
+                }}
+                disabled={isSwitchingInnings}
+                className="flex-1 px-6 py-3 bg-white/5 border border-white/20 rounded-xl font-semibold hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSwitchInnings}
+                disabled={
+                  !secondInningsStrikerId ||
+                  !secondInningsNonStrikerId ||
+                  !secondInningsBowlerId ||
+                  isSwitchingInnings
+                }
+                className="flex-1 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-lg transform hover:scale-[1.02] active:scale-[0.98] transition-all duration-200"
+              >
+                {isSwitchingInnings ? "Switching..." : "Start Second Innings"}
+              </button>
+            </div>
           </div>
         )}
 

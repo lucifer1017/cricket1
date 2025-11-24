@@ -6,6 +6,7 @@ import {
   orderBy,
   limit,
   getDocs,
+  getDoc,
   serverTimestamp,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
@@ -18,10 +19,27 @@ import type {
 } from "@/types/cricket";
 import { ExtraType, MatchStatus, WicketType } from "@/types/cricket";
 
-const INNINGS_ID = "1";
+const getInningsId = (matchData: Match): string => {
+  // Determine innings based on which team is batting
+  // First innings: team that won toss and chose to bat
+  // Second innings: the other team
+  if (!matchData.toss) return "1";
+  
+  const tossWinner = matchData.toss.winner_id;
+  const tossDecision = matchData.toss.decision;
+  const currentBattingTeam = matchData.live_state.batting_team_id;
+  
+  // If toss winner chose to bat, first innings is when they bat
+  if (tossDecision === "bat") {
+    return currentBattingTeam === tossWinner ? "1" : "2";
+  } else {
+    // If toss winner chose to bowl, first innings is when the other team bats
+    return currentBattingTeam === tossWinner ? "2" : "1";
+  }
+};
 
-const getBallsCollection = (matchId: string) =>
-  collection(db, "matches", matchId, "innings", INNINGS_ID, "balls");
+const getBallsCollection = (matchId: string, inningsId: string) =>
+  collection(db, "matches", matchId, "innings", inningsId, "balls");
 
 const deepCloneState = (state: MatchLiveState): MatchLiveState =>
   JSON.parse(JSON.stringify(state));
@@ -66,6 +84,7 @@ export async function recordBall(
       throw new Error("Match is not live. Cannot record ball.");
     }
 
+    const inningsId = getInningsId(matchData);
     const preBallState = deepCloneState(matchData.live_state);
     const liveState = deepCloneState(matchData.live_state);
     const score = { ...liveState.score };
@@ -193,7 +212,7 @@ export async function recordBall(
     const ballEvent: BallEvent = {
       id: ballIdentifier,
       match_id: matchId,
-      innings_id: INNINGS_ID,
+      innings_id: inningsId,
       timestamp: null,
       runs_off_bat: ballInput.runs_off_bat,
       extras: ballInput.extras
@@ -213,7 +232,7 @@ export async function recordBall(
       post_ball_state: liveState,
     };
 
-    const ballsCollection = getBallsCollection(matchId);
+    const ballsCollection = getBallsCollection(matchId, inningsId);
     const ballDoc = doc(ballsCollection);
 
     const overEntry: OverBall = {

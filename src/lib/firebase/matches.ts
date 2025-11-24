@@ -22,6 +22,7 @@ import {
   limit,
   serverTimestamp,
   arrayUnion,
+  deleteField,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { auth } from "@/lib/firebase/config";
@@ -620,6 +621,92 @@ export async function startMatch(
       throw error;
     }
     throw new Error("Failed to start match. Please try again.");
+  }
+}
+
+/**
+ * Switch to Second Innings
+ * 
+ * Swaps batting and bowling teams, resets score, and prepares for second innings.
+ * Requires selecting new opening players.
+ */
+export async function switchToSecondInnings(
+  matchId: string,
+  openers: OpeningPlayersInput
+): Promise<void> {
+  try {
+    const matchRef = doc(db, "matches", matchId);
+    const matchSnap = await getDoc(matchRef);
+
+    if (!matchSnap.exists()) {
+      throw new Error("Match not found");
+    }
+
+    const matchData = matchSnap.data() as Match;
+
+    // Validate match is live
+    if (matchData.status !== MatchStatus.LIVE) {
+      throw new Error("Match must be live to switch innings");
+    }
+
+    // Get current batting and bowling teams
+    const currentBattingTeam = matchData.live_state.batting_team_id;
+    const currentBowlingTeam = matchData.live_state.bowling_team_id;
+    
+    // Store first innings total before resetting score
+    const firstInningsTotal = matchData.live_state.score.runs;
+
+    // Swap teams for second innings
+    const newBattingTeam = currentBowlingTeam;
+    const newBowlingTeam = currentBattingTeam;
+
+    // Validate opening players are from correct teams
+    const newBattingTeamData = matchData.teams[newBattingTeam as "a" | "b"];
+    const newBowlingTeamData = matchData.teams[newBowlingTeam as "a" | "b"];
+
+    if (
+      !newBattingTeamData.players.some((p) => p.id === openers.striker_id) ||
+      !newBattingTeamData.players.some((p) => p.id === openers.non_striker_id)
+    ) {
+      throw new Error("Striker and non-striker must be from the batting team");
+    }
+
+    if (!newBowlingTeamData.players.some((p) => p.id === openers.bowler_id)) {
+      throw new Error("Bowler must be from the bowling team");
+    }
+
+    // Update match document for second innings
+    await updateDoc(matchRef, {
+      "live_state.batting_team_id": newBattingTeam,
+      "live_state.bowling_team_id": newBowlingTeam,
+      "live_state.striker_id": openers.striker_id,
+      "live_state.non_striker_id": openers.non_striker_id,
+      "live_state.bowler_id": openers.bowler_id,
+      "live_state.score.runs": 0,
+      "live_state.score.wickets": 0,
+      "live_state.score.overs": 0,
+      "live_state.score.balls": 0,
+      "live_state.first_innings_total": firstInningsTotal, // Store first innings total for RRR calculation
+      "live_state.player_stats": {
+        batters: {},
+        bowlers: {},
+      },
+      "live_state.this_over": [],
+      "live_state.is_free_hit": false,
+      "live_state.last_bowler_id": deleteField(),
+      updated_at: serverTimestamp(),
+    });
+  } catch (error: unknown) {
+    console.error("Error switching innings:", error);
+    if (
+      error instanceof Error &&
+      (error.message.includes("not found") ||
+        error.message.includes("must be") ||
+        error.message.includes("must have"))
+    ) {
+      throw error;
+    }
+    throw new Error("Failed to switch innings. Please try again.");
   }
 }
 

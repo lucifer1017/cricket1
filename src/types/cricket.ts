@@ -138,6 +138,7 @@ export interface MatchLiveState {
   is_free_hit?: boolean;
   last_ball_id?: string;
   last_bowler_id?: string; // Player ID of the bowler who just completed an over (prevents consecutive overs)
+  first_innings_total?: number; // Total runs scored in first innings (for RRR calculation in second innings)
 }
 
 /**
