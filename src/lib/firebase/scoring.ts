@@ -71,10 +71,20 @@ export async function recordBall(
     const score = { ...liveState.score };
     const playerStats = clonePlayerStats(liveState.player_stats);
 
-    // VALIDATION: Prevent recording if over is complete (balls === 0 after overs > 0)
+    // VALIDATION: Prevent recording if innings is complete (reached total overs limit)
+    const totalOvers = matchData.config?.total_overs ?? 0;
+    if (score.overs >= totalOvers) {
+      throw new Error(`Innings complete! ${totalOvers} overs have been bowled. Please switch to the next innings.`);
+    }
+
+    // VALIDATION: Prevent recording if over is complete AND we haven't selected a new bowler
     // This prevents the race condition where a ball can be recorded between
     // over completion detection and UI state update
-    if (score.balls === 0 && score.overs > 0) {
+    // Only block if: balls === 0, overs > 0, AND current bowler is same as last bowler
+    // (meaning we're still waiting for bowler selection)
+    if (score.balls === 0 && score.overs > 0 && 
+        liveState.bowler_id && liveState.last_bowler_id &&
+        liveState.bowler_id === liveState.last_bowler_id) {
       throw new Error("Over is complete. Please select a new bowler before recording the next ball.");
     }
 

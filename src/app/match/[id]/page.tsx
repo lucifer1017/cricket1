@@ -51,6 +51,7 @@ export default function MatchScorerPage() {
   const [isUpdatingBowler, setIsUpdatingBowler] = useState(false);
   const [showBowlerSelector, setShowBowlerSelector] = useState(false);
   const prevScoreRef = useRef<{ overs: number; balls: number } | null>(null);
+  const justSelectedBowlerRef = useRef(false);
 
   useEffect(() => {
     if (!matchId) return;
@@ -94,25 +95,43 @@ export default function MatchScorerPage() {
       return;
     }
 
+    // Check if innings is complete (reached total overs limit)
+    const totalOvers = match?.config?.total_overs ?? 0;
+    const inningsComplete = score.overs >= totalOvers;
+
     // Over completed when:
     // 1. Balls reset to 0 (from any value > 0)
     // 2. Overs increased
     // 3. This is not the initial state (prevScore.balls was > 0)
+    // 4. Innings is NOT complete (if innings is complete, don't show bowler selector)
     const overJustCompleted =
       prevScore.balls > 0 &&
       score.balls === 0 &&
-      score.overs > prevScore.overs;
+      score.overs > prevScore.overs &&
+      !inningsComplete;
 
     // Also detect if we're in an over completion state (balls === 0, overs > 0)
     // This handles cases after undo or if state was restored
+    // BUT only if the current bowler is the same as last_bowler_id (meaning we need to change)
+    // AND we haven't just selected a bowler (to prevent immediate re-opening)
+    // AND innings is NOT complete
     const isInOverCompletionState = 
       score.balls === 0 && 
       score.overs > 0 && 
+      !inningsComplete &&
       liveState?.bowler_id &&
-      !showBowlerSelector;
+      liveState?.last_bowler_id &&
+      !showBowlerSelector &&
+      !justSelectedBowlerRef.current &&
+      liveState.bowler_id === liveState.last_bowler_id;
 
-    if ((overJustCompleted || isInOverCompletionState) && liveState?.bowler_id && !showBowlerSelector) {
+    if ((overJustCompleted || isInOverCompletionState) && liveState?.bowler_id && !showBowlerSelector && !justSelectedBowlerRef.current) {
       setShowBowlerSelector(true);
+    }
+
+    // Reset the flag after checking (so it only prevents one cycle)
+    if (justSelectedBowlerRef.current) {
+      justSelectedBowlerRef.current = false;
     }
 
     // Update the ref with current score (only when score actually changes)
@@ -289,6 +308,10 @@ export default function MatchScorerPage() {
     }
   };
 
+  // Check if innings is complete
+  const totalOvers = match?.config?.total_overs ?? 0;
+  const inningsComplete = score && score.overs >= totalOvers;
+
   const availableNewBowlers =
     bowlingTeam?.players.filter(
       (player) => 
@@ -299,8 +322,11 @@ export default function MatchScorerPage() {
 
   // Check if we're in a state where we need to select a bowler
   // This is true when the bowler selector is showing
-  // We also check if an over just completed (as a safety check in handlers)
-  const needsBowlerSelection = showBowlerSelector;
+  // BUT NOT if innings is complete (in that case, we need to switch innings)
+  const needsBowlerSelection = showBowlerSelector && !inningsComplete;
+  
+  // Disable keypad if innings is complete
+  const keypadDisabledByInnings = inningsComplete;
 
   const handleNewBowlerSelect = async () => {
     if (!matchId || !newBowlerId) return;
@@ -316,9 +342,12 @@ export default function MatchScorerPage() {
       setError("");
       await updateDoc(doc(db, "matches", matchId), {
         "live_state.bowler_id": newBowlerId,
+        // Keep last_bowler_id to prevent that bowler from bowling consecutive overs
       });
       setNewBowlerId("");
       setShowBowlerSelector(false);
+      // Set flag to prevent selector from immediately re-opening
+      justSelectedBowlerRef.current = true;
     } catch (err) {
       console.error("New bowler error:", err);
       setError(err instanceof Error ? err.message : "Failed to set new bowler");
@@ -356,7 +385,7 @@ export default function MatchScorerPage() {
     ? `${match.teams[match.toss.winner_id].name} chose to ${match.toss.decision}`
     : "Toss pending";
 
-  const keypadDisabled = showNewBatterSelector || needsBowlerSelection;
+  const keypadDisabled = showNewBatterSelector || needsBowlerSelection || keypadDisabledByInnings;
 
   return (
     <div className="min-h-screen bg-linear-to-br from-indigo-900 via-purple-900 to-pink-900 relative overflow-hidden py-8 px-4">
@@ -499,8 +528,38 @@ export default function MatchScorerPage() {
           </div>
         )}
 
+        {/* Innings Complete Message */}
+        {inningsComplete && (
+          <div className="backdrop-blur-xl bg-gradient-to-r from-green-500/20 to-blue-500/20 rounded-3xl border border-green-400/50 p-6 text-white space-y-4">
+            <div className="flex items-center gap-3">
+              <svg
+                className="w-6 h-6 text-green-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <p className="text-xl font-semibold">
+                Innings Complete!
+              </p>
+            </div>
+            <p className="text-white/80">
+              {totalOvers} overs have been bowled. The batting team has scored {score?.runs || 0} runs for {score?.wickets || 0} wickets.
+            </p>
+            <p className="text-white/60 text-sm">
+              Please switch to the next innings or end the match.
+            </p>
+          </div>
+        )}
+
         {/* New Bowler Selection (After Over Completion) */}
-        {showBowlerSelector && (
+        {showBowlerSelector && !inningsComplete && (
           <div className="backdrop-blur-xl bg-white/10 rounded-3xl border border-white/20 p-6 text-white space-y-4">
             <p className="text-lg font-semibold">
               Over Complete! Select New Bowler
