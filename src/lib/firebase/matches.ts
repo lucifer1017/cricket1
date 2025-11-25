@@ -331,6 +331,9 @@ export async function updateToss(
       toss: tossResult,
       "live_state.batting_team_id": battingTeamId,
       "live_state.bowling_team_id": bowlingTeamId,
+      "live_state.first_batting_team_id": battingTeamId,
+      "live_state.second_batting_team_id": bowlingTeamId,
+      "live_state.current_innings": 1,
       updated_at: serverTimestamp(),
     });
   } catch (error: unknown) {
@@ -655,6 +658,7 @@ export async function switchToSecondInnings(
     
     // Store first innings total before resetting score
     const firstInningsTotal = matchData.live_state.score.runs;
+    const firstBattingTeam = matchData.live_state.first_batting_team_id ?? currentBattingTeam;
 
     // Swap teams for second innings
     const newBattingTeam = currentBowlingTeam;
@@ -687,6 +691,9 @@ export async function switchToSecondInnings(
       "live_state.score.overs": 0,
       "live_state.score.balls": 0,
       "live_state.first_innings_total": firstInningsTotal, // Store first innings total for RRR calculation
+      "live_state.current_innings": 2,
+      "live_state.first_batting_team_id": firstBattingTeam,
+      "live_state.second_batting_team_id": newBattingTeam,
       "live_state.player_stats": {
         batters: {},
         bowlers: {},
@@ -710,9 +717,126 @@ export async function switchToSecondInnings(
   }
 }
 
+/**
+ * Create a rematch using the same squads as an existing match.
+ * Allows changing the total overs configuration.
+ */
+export async function createRematchWithSameSquads(
+  matchId: string,
+  totalOvers: number
+): Promise<string> {
+  if (totalOvers < 1 || totalOvers > 50) {
+    throw new Error("Overs must be between 1 and 50");
+  }
+
+  const matchRef = doc(db, "matches", matchId);
+  const matchSnap = await getDoc(matchRef);
+
+  if (!matchSnap.exists()) {
+    throw new Error("Match not found");
+  }
+
+  const matchData = matchSnap.data() as Match;
+
+  if (matchData.status !== MatchStatus.COMPLETED) {
+    throw new Error("Match must be completed before starting a rematch");
+  }
+
+  const now = Date.now();
+  const score: Score = { runs: 0, wickets: 0, overs: 0, balls: 0 };
+
+  const newMatch: Omit<Match, "id"> = {
+    owner_id: matchData.owner_id,
+    status: MatchStatus.SCHEDULED,
+    config: {
+      ...matchData.config,
+      total_overs: totalOvers,
+    },
+    player_pool: [
+      ...matchData.teams.a.players,
+      ...matchData.teams.b.players,
+    ],
+    teams: {
+      a: {
+        ...matchData.teams.a,
+        players: [...matchData.teams.a.players],
+      },
+      b: {
+        ...matchData.teams.b,
+        players: [...matchData.teams.b.players],
+      },
+    },
+    toss: null,
+    live_state: {
+      batting_team_id: "",
+      bowling_team_id: "",
+      striker_id: "",
+      non_striker_id: "",
+      bowler_id: "",
+      score,
+      this_over: [],
+      player_stats: { batters: {}, bowlers: {} },
+      is_free_hit: false,
+      current_innings: 1,
+    },
+    created_at: now,
+    updated_at: now,
+  };
+
+  const matchesRef = matchesCollection();
+  const docRef = await addDoc(matchesRef, {
+    ...newMatch,
+    created_at: serverTimestamp(),
+    updated_at: serverTimestamp(),
+  });
+
+  return docRef.id;
+}
+
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
+
+/**
+ * End Match
+ * 
+ * Marks a match as completed, ending the game.
+ * 
+ * @param matchId - The match document ID
+ */
+export async function endMatch(matchId: string): Promise<void> {
+  try {
+    const matchRef = doc(db, "matches", matchId);
+    const matchSnap = await getDoc(matchRef);
+
+    if (!matchSnap.exists()) {
+      throw new Error("Match not found");
+    }
+
+    const matchData = matchSnap.data() as Match;
+
+    // Validate match is live
+    if (matchData.status !== MatchStatus.LIVE) {
+      throw new Error("Only live matches can be ended");
+    }
+
+    // Update match status to completed
+    await updateDoc(matchRef, {
+      status: MatchStatus.COMPLETED,
+      updated_at: serverTimestamp(),
+    });
+  } catch (error: unknown) {
+    console.error("Error ending match:", error);
+    if (
+      error instanceof Error &&
+      (error.message.includes("not found") ||
+        error.message.includes("Only live"))
+    ) {
+      throw error;
+    }
+    throw new Error("Failed to end match. Please try again.");
+  }
+}
 
 /**
  * Get Match by ID

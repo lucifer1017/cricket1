@@ -226,7 +226,7 @@ export default function PlayerPoolSelector({
       </div>
 
       {showDropdown && (
-        <div className="absolute z-50 w-full mt-2 bg-white/10 backdrop-blur-md border border-white/10 rounded-xl shadow-2xl max-h-64 overflow-y-auto">
+        <div className="absolute z-50 w-full mt-2 bg-black/90 backdrop-blur-md border border-white/20 rounded-xl shadow-2xl max-h-64 overflow-y-auto">
           {searchResults.length > 0 ? (
             <div className="py-2">
               {searchResults.map((player) => (

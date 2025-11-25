@@ -1,15 +1,16 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { doc, onSnapshot, updateDoc } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { recordBall, undoLastBall } from "@/lib/firebase/scoring";
-import { switchToSecondInnings } from "@/lib/firebase/matches";
+import { switchToSecondInnings, endMatch, createRematchWithSameSquads } from "@/lib/firebase/matches";
 import type { Match, PlayerStatsState } from "@/types/cricket";
-import { WicketType, ExtraType } from "@/types/cricket";
+import { WicketType, ExtraType, MatchStatus } from "@/types/cricket";
 import BowlerStatsSidebar from "@/components/match/BowlerStatsSidebar";
+import BatterStatsSidebar from "@/components/match/BatterStatsSidebar";
 
 type WicketMode = {
   active: boolean;
@@ -36,6 +37,7 @@ const EXTRA_BUTTONS: { label: string; type: ExtraType; runs: number }[] = [
 
 export default function MatchScorerPage() {
   const params = useParams();
+  const router = useRouter();
   const matchId = params?.id as string | undefined;
 
   const [match, setMatch] = useState<Match | null>(null);
@@ -56,8 +58,12 @@ export default function MatchScorerPage() {
   const [secondInningsNonStrikerId, setSecondInningsNonStrikerId] = useState("");
   const [secondInningsBowlerId, setSecondInningsBowlerId] = useState("");
   const [isSwitchingInnings, setIsSwitchingInnings] = useState(false);
+  const [isEndingMatch, setIsEndingMatch] = useState(false);
   const prevScoreRef = useRef<{ overs: number; balls: number } | null>(null);
   const justSelectedBowlerRef = useRef(false);
+  const [showRematchModal, setShowRematchModal] = useState(false);
+  const [rematchOvers, setRematchOvers] = useState(20);
+  const [isCreatingRematch, setIsCreatingRematch] = useState(false);
 
   useEffect(() => {
     if (!matchId) return;
@@ -71,8 +77,27 @@ export default function MatchScorerPage() {
           setLoading(false);
           return;
         }
-        setMatch(snapshot.data() as Match);
+        // Include document ID in match data (same pattern as getActiveMatch)
+        const matchData = {
+          id: snapshot.id,
+          ...snapshot.data(),
+        } as Match;
+        setMatch(matchData);
         setLoading(false);
+        
+        // Debug logging for second innings issues
+        const liveState = matchData.live_state;
+        if (liveState) {
+          console.log("Match data updated:", {
+            match_id: snapshot.id,
+            batting_team_id: liveState.batting_team_id,
+            striker_id: liveState.striker_id,
+            non_striker_id: liveState.non_striker_id,
+            bowler_id: liveState.bowler_id,
+            first_innings_total: liveState.first_innings_total,
+            score: liveState.score,
+          });
+        }
       },
       (err) => {
         console.error("Match listener error:", err);
@@ -84,12 +109,20 @@ export default function MatchScorerPage() {
     return () => unsubscribe();
   }, [matchId]);
 
+  useEffect(() => {
+    if (match?.config?.total_overs) {
+      setRematchOvers(match.config.total_overs);
+    }
+  }, [match?.config?.total_overs]);
+
   const liveState = match?.live_state;
   const score = liveState?.score;
+  const matchCompleted = match?.status === MatchStatus.COMPLETED;
+  const matchResult = match?.result ?? null;
 
   // Detect over completion
   useEffect(() => {
-    if (!score) {
+    if (!score || matchCompleted) {
       return;
     }
 
@@ -132,7 +165,11 @@ export default function MatchScorerPage() {
       liveState.bowler_id === liveState.last_bowler_id;
 
     // Check if innings is complete and show switch option
-    if (inningsComplete && !showInningsSwitch && !showBowlerSelector) {
+    if (
+      inningsComplete &&
+      !showInningsSwitch &&
+      !showBowlerSelector
+    ) {
       setShowInningsSwitch(true);
     }
 
@@ -149,7 +186,22 @@ export default function MatchScorerPage() {
     if (prevScore.overs !== score.overs || prevScore.balls !== score.balls) {
       prevScoreRef.current = { overs: score.overs, balls: score.balls };
     }
-  }, [score, liveState?.bowler_id, showBowlerSelector]);
+  }, [
+    score,
+    liveState?.bowler_id,
+    showBowlerSelector,
+    match?.config?.total_overs,
+    matchCompleted,
+    liveState?.last_bowler_id,
+    showInningsSwitch,
+  ]);
+
+  useEffect(() => {
+    if (matchCompleted) {
+      setShowInningsSwitch(false);
+      setShowBowlerSelector(false);
+    }
+  }, [matchCompleted]);
   const playerStats: PlayerStatsState =
     liveState?.player_stats ?? { batters: {}, bowlers: {} };
 
@@ -170,12 +222,18 @@ export default function MatchScorerPage() {
     ? resolveTeam(match.teams, liveState?.bowling_team_id)
     : null;
 
-  // Get teams for second innings (swapped) - defined early so they're available in JSX
+  // Team references for innings context
   const secondInningsBattingTeam = match
     ? resolveTeam(match.teams, liveState?.bowling_team_id)
     : null;
   const secondInningsBowlingTeam = match
     ? resolveTeam(match.teams, liveState?.batting_team_id)
+    : null;
+  const firstInningsBattingTeam = match
+    ? resolveTeam(match.teams, liveState?.first_batting_team_id)
+    : null;
+  const chasingTeam = match
+    ? resolveTeam(match.teams, liveState?.second_batting_team_id)
     : null;
 
   const striker =
@@ -183,6 +241,51 @@ export default function MatchScorerPage() {
   const nonStriker =
     battingTeam?.players.find((p) => p.id === liveState?.non_striker_id) ||
     null;
+
+  // Debug: Log batsmen lookup issues
+  useEffect(() => {
+    if (liveState) {
+      const hasStrikerId = !!liveState.striker_id;
+      const hasNonStrikerId = !!liveState.non_striker_id;
+      const hasBattingTeam = !!battingTeam;
+      
+      console.log("Batsmen Lookup Debug:", {
+        striker_id: liveState.striker_id,
+        non_striker_id: liveState.non_striker_id,
+        batting_team_id: liveState.batting_team_id,
+        has_batting_team: hasBattingTeam,
+        batting_team_players_count: battingTeam?.players.length ?? 0,
+        batting_team_player_ids: battingTeam?.players.map(p => ({ id: p.id, name: p.name })) ?? [],
+        striker_found: !!striker,
+        non_striker_found: !!nonStriker,
+      });
+      
+      if (hasStrikerId && hasNonStrikerId && hasBattingTeam) {
+        const foundStriker = battingTeam!.players.find((p) => p.id === liveState.striker_id);
+        const foundNonStriker = battingTeam!.players.find((p) => p.id === liveState.non_striker_id);
+        if (!foundStriker) {
+          console.error("❌ Striker not found in team:", {
+            striker_id: liveState.striker_id,
+            batting_team_id: liveState.batting_team_id,
+            available_player_ids: battingTeam!.players.map(p => p.id),
+          });
+        }
+        if (!foundNonStriker) {
+          console.error("❌ Non-striker not found in team:", {
+            non_striker_id: liveState.non_striker_id,
+            batting_team_id: liveState.batting_team_id,
+            available_player_ids: battingTeam!.players.map(p => p.id),
+          });
+        }
+      } else {
+        console.warn("⚠️ Missing data for batsmen lookup:", {
+          has_striker_id: hasStrikerId,
+          has_non_striker_id: hasNonStrikerId,
+          has_batting_team: hasBattingTeam,
+        });
+      }
+    }
+  }, [liveState, liveState?.striker_id, liveState?.non_striker_id, liveState?.batting_team_id, battingTeam, striker, nonStriker]);
   const bowler =
     bowlingTeam?.players.find((p) => p.id === liveState?.bowler_id) || null;
 
@@ -204,15 +307,19 @@ export default function MatchScorerPage() {
     return runRate.toFixed(2);
   }, [score]);
 
+  const isSecondInnings = liveState?.current_innings === 2;
+
   // Calculate Required Run Rate (RRR) for second innings
   const rrr = useMemo(() => {
     // Only show RRR in second innings (when first_innings_total exists)
-    // Use == null to check for both undefined and null, but allow 0
-    if (!score || liveState?.first_innings_total == null) {
+    // Use != null to check if it's defined (allows 0, but not undefined/null)
+    const firstInningsTotal = liveState?.first_innings_total;
+    
+    if (!score || firstInningsTotal == null || liveState?.current_innings !== 2) {
       return null;
     }
     
-    const target = liveState.first_innings_total + 1; // Target to win
+    const target = firstInningsTotal + 1; // Target to win
     const currentScore = score.runs;
     const runsNeeded = target - currentScore;
     
@@ -228,11 +335,34 @@ export default function MatchScorerPage() {
     
     const requiredRunRate = runsNeeded / remainingOvers;
     return requiredRunRate.toFixed(2);
-  }, [score, liveState?.first_innings_total, match?.config?.total_overs]);
+  }, [score, liveState?.first_innings_total, liveState?.current_innings, match?.config?.total_overs]);
+  
+  // Debug RRR calculation
+  useEffect(() => {
+    if (liveState) {
+      console.log("RRR Calculation Debug:", {
+        has_score: !!score,
+        first_innings_total: liveState.first_innings_total,
+        first_innings_total_type: typeof liveState.first_innings_total,
+        is_null: liveState.first_innings_total == null,
+        is_undefined: liveState.first_innings_total === undefined,
+        rrr_result: rrr,
+        current_score: score?.runs,
+        current_overs: score?.overs,
+        current_balls: score?.balls,
+        current_innings: liveState.current_innings,
+      });
+    }
+  }, [liveState, liveState?.first_innings_total, liveState?.current_innings, score, rrr]);
 
   const handleRecordRun = async (runs: number) => {
     if (!matchId) return;
     
+    if (matchCompleted) {
+      setError("Match is already completed");
+      return;
+    }
+
     // Prevent recording if bowler needs to be selected
     if (needsBowlerSelection) {
       setError("Please select a new bowler first");
@@ -255,6 +385,11 @@ export default function MatchScorerPage() {
   ) => {
     if (!matchId) return;
     
+    if (matchCompleted) {
+      setError("Match is already completed");
+      return;
+    }
+
     // Prevent recording if bowler needs to be selected
     if (needsBowlerSelection) {
       setError("Please select a new bowler first");
@@ -292,6 +427,11 @@ export default function MatchScorerPage() {
   const completeWicket = async () => {
     if (!matchId || !wicketState.batterSide || !wicketState.type) {
       setError("Select dismissal side and type");
+      return;
+    }
+
+    if (matchCompleted) {
+      setError("Match is already completed");
       return;
     }
     
@@ -338,6 +478,11 @@ export default function MatchScorerPage() {
 
   const handleNewBatterSelect = async () => {
     if (!matchId || !newBatterId) return;
+
+    if (matchCompleted) {
+      setError("Match is already completed");
+      return;
+    }
     try {
       setIsUpdatingBatter(true);
       setError("");
@@ -355,7 +500,10 @@ export default function MatchScorerPage() {
 
   // Check if innings is complete
   const totalOvers = match?.config?.total_overs ?? 0;
-  const inningsComplete = score && score.overs >= totalOvers;
+  const inningsComplete =
+    !!score &&
+    (liveState?.current_innings ?? 1) === 1 &&
+    score.overs >= totalOvers;
 
   const availableNewBowlers =
     bowlingTeam?.players.filter(
@@ -368,13 +516,18 @@ export default function MatchScorerPage() {
   // Check if we're in a state where we need to select a bowler
   // This is true when the bowler selector is showing
   // BUT NOT if innings is complete (in that case, we need to switch innings)
-  const needsBowlerSelection = showBowlerSelector && !inningsComplete;
+  const needsBowlerSelection = showBowlerSelector && !inningsComplete && !matchCompleted;
   
   // Disable keypad if innings is complete
   const keypadDisabledByInnings = inningsComplete;
 
   const handleNewBowlerSelect = async () => {
     if (!matchId || !newBowlerId) return;
+
+    if (matchCompleted) {
+      setError("Match is already completed");
+      return;
+    }
     
     // Safety check: prevent selecting the bowler who just completed an over
     if (newBowlerId === liveState?.last_bowler_id) {
@@ -402,6 +555,11 @@ export default function MatchScorerPage() {
   };
 
   const handleSwitchInnings = async () => {
+    if (matchCompleted) {
+      setError("Match is already completed");
+      return;
+    }
+
     if (!matchId || !secondInningsStrikerId || !secondInningsNonStrikerId || !secondInningsBowlerId) {
       setError("Please select all opening players for the second innings");
       return;
@@ -424,6 +582,52 @@ export default function MatchScorerPage() {
       setError(err instanceof Error ? err.message : "Failed to switch innings");
     } finally {
       setIsSwitchingInnings(false);
+    }
+  };
+
+  const handleEndMatch = async () => {
+    if (!matchId) return;
+    
+    if (!confirm("Are you sure you want to end this match? This action cannot be undone.")) {
+      return;
+    }
+
+    try {
+      setIsEndingMatch(true);
+      setError("");
+      await endMatch(matchId);
+      // Match status will be updated, and the component will react to the change
+      setError("Match ended successfully. Redirecting to dashboard...");
+      setTimeout(() => {
+        window.location.href = "/";
+      }, 2000);
+    } catch (err) {
+      console.error("End match error:", err);
+      setError(err instanceof Error ? err.message : "Failed to end match");
+    } finally {
+      setIsEndingMatch(false);
+    }
+  };
+
+  const handleCreateRematch = async () => {
+    if (!matchId) return;
+
+    if (rematchOvers < 1 || rematchOvers > 50) {
+      setError("Overs must be between 1 and 50");
+      return;
+    }
+
+    try {
+      setIsCreatingRematch(true);
+      setError("");
+      const newMatchId = await createRematchWithSameSquads(matchId, rematchOvers);
+      setShowRematchModal(false);
+      router.push(`/match/new?matchId=${newMatchId}`);
+    } catch (err) {
+      console.error("Rematch error:", err);
+      setError(err instanceof Error ? err.message : "Failed to create rematch");
+    } finally {
+      setIsCreatingRematch(false);
     }
   };
 
@@ -456,10 +660,15 @@ export default function MatchScorerPage() {
     ? `${match.teams[match.toss.winner_id].name} chose to ${match.toss.decision}`
     : "Toss pending";
 
-  const keypadDisabled = showNewBatterSelector || needsBowlerSelection || keypadDisabledByInnings;
+  const keypadDisabled =
+    matchCompleted ||
+    showNewBatterSelector ||
+    needsBowlerSelection ||
+    keypadDisabledByInnings;
 
   return (
-    <div className="min-h-screen bg-linear-to-br from-indigo-900 via-purple-900 to-pink-900 relative overflow-hidden py-8 px-4">
+    <>
+      <div className="min-h-screen bg-linear-to-br from-indigo-900 via-purple-900 to-pink-900 relative overflow-hidden py-8 px-4">
       <div className="absolute inset-0 overflow-hidden">
         <div className="absolute -top-40 -right-40 w-80 h-80 bg-purple-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob"></div>
         <div className="absolute -bottom-40 -left-40 w-80 h-80 bg-pink-500 rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob animation-delay-2000"></div>
@@ -480,34 +689,46 @@ export default function MatchScorerPage() {
               {teamAName} vs {teamBName}
             </h1>
           </div>
-          <div className="mt-3 sm:mt-0 text-white/80 text-sm">
-            {tossLabel}
+          <div className="mt-3 sm:mt-0 flex items-center gap-4">
+            <div className="text-white/80 text-sm">{tossLabel}</div>
+            {match?.status === MatchStatus.LIVE && (
+              <button
+                onClick={handleEndMatch}
+                disabled={isEndingMatch}
+                className="px-4 py-2 bg-red-500/20 border border-red-400/50 rounded-xl text-red-200 font-semibold hover:bg-red-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+              >
+                {isEndingMatch ? "Ending..." : "End Match"}
+              </button>
+            )}
           </div>
         </div>
 
         {/* Scoreboard */}
         <div className="backdrop-blur-xl bg-white/10 rounded-3xl border border-white/20 p-8 text-white flex flex-col gap-6">
-          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between">
-            <div>
+          <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-6">
+            <div className="flex-1">
               <p className="uppercase text-white/60 text-xs tracking-[0.2em] mb-2">
                 Current Score
               </p>
               <div className="text-6xl font-bold tracking-tight">
                 {score.runs}/{score.wickets}
               </div>
-              {liveState?.first_innings_total !== undefined && (
+              {isSecondInnings && liveState?.first_innings_total !== undefined && (
                 <div className="mt-2">
                   <p className="text-white/70 text-sm">
-                    Target: <span className="font-semibold text-yellow-400">{liveState.first_innings_total + 1}</span>
+                    Target ({firstInningsBattingTeam?.name || "First Innings"}):{" "}
+                    <span className="font-semibold text-yellow-400">{liveState.first_innings_total + 1}</span>
                     {" • "}
-                    Need: <span className="font-semibold text-yellow-400">
+                    Need ({chasingTeam?.name || "Chasing Team"}):{" "}
+                    <span className="font-semibold text-yellow-400">
                       {Math.max(0, liveState.first_innings_total + 1 - score.runs)}
-                    </span> runs
+                    </span>{" "}
+                    runs
                   </p>
                 </div>
               )}
             </div>
-            <div className="flex gap-6 text-white/80 text-sm mt-4 sm:mt-0">
+            <div className="flex gap-6 text-white/80 text-sm">
               <div>
                 <p className="text-white/50 text-xs uppercase tracking-widest">
                   Overs
@@ -522,7 +743,7 @@ export default function MatchScorerPage() {
                 </p>
                 <p className="text-lg font-semibold">{crr}</p>
               </div>
-              {rrr !== null && (
+              {isSecondInnings && rrr !== null && (
                 <div>
                   <p className="text-white/50 text-xs uppercase tracking-widest">
                     RRR
@@ -530,6 +751,22 @@ export default function MatchScorerPage() {
                   <p className="text-lg font-semibold text-yellow-400">{rrr}</p>
                 </div>
               )}
+            </div>
+            <div className="text-white/60 text-xs uppercase tracking-widest">
+              {matchCompleted
+                ? "Match Completed"
+                : isSecondInnings
+                ? "Second Innings • Chasing"
+                : "First Innings • Setting Target"}
+              <div className="text-white text-sm normal-case mt-1">
+                {matchCompleted
+                  ? matchResult?.summary || "Final result"
+                  : isSecondInnings
+                  ? `${chasingTeam?.name || battingTeam?.name} chasing ${
+                      firstInningsBattingTeam?.name || "target"
+                    }`
+                  : `${battingTeam?.name || "Batting team"} batting first`}
+              </div>
             </div>
           </div>
 
@@ -587,9 +824,54 @@ export default function MatchScorerPage() {
             </div>
           </div>
         </div>
+        {matchCompleted && matchResult && (
+          <div className="backdrop-blur-xl bg-green-500/15 rounded-3xl border border-green-400/40 p-6 text-white space-y-4">
+            <div className="flex items-center gap-3">
+              <svg
+                className="w-8 h-8 text-green-300"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"
+                />
+              </svg>
+              <div>
+                <p className="text-xl font-semibold">{matchResult.summary}</p>
+                <p className="text-white/70 text-sm">
+                  {firstInningsBattingTeam?.name || "Team"}: {matchResult.first_innings_runs} runs •{" "}
+                  {chasingTeam?.name || "Team"}: {matchResult.second_innings_runs} runs
+                </p>
+              </div>
+            </div>
+            {matchResult.margin && (
+              <p className="text-white/70 text-sm">
+                Margin: <span className="font-semibold text-white">{matchResult.margin}</span>
+              </p>
+            )}
+            <div className="flex flex-col sm:flex-row gap-3">
+              <button
+                onClick={() => router.push("/match/new")}
+                className="flex-1 px-6 py-3 bg-white/10 border border-white/20 rounded-xl font-semibold hover:bg-white/20 transition-all"
+              >
+                Start Fresh Match
+              </button>
+              <button
+                onClick={() => setShowRematchModal(true)}
+                className="flex-1 px-6 py-3 bg-linear-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:shadow-lg transform hover:scale-[1.02] active:scale-[0.98] transition-all duration-200"
+              >
+                Rematch With Same Squads
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* New Batter */}
-        {showNewBatterSelector && (
+        {!matchCompleted && showNewBatterSelector && (
           <div className="backdrop-blur-xl bg-white/10 rounded-3xl border border-white/20 p-6 text-white space-y-4">
             <p className="text-lg font-semibold">
               Select New Batter (Striker)
@@ -610,7 +892,7 @@ export default function MatchScorerPage() {
               <button
                 onClick={handleNewBatterSelect}
                 disabled={!newBatterId || isUpdatingBatter}
-                className="px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-6 py-3 bg-linear-to-r from-purple-500 to-pink-500 rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isUpdatingBatter ? "Updating..." : "Confirm"}
               </button>
@@ -619,8 +901,8 @@ export default function MatchScorerPage() {
         )}
 
         {/* Innings Complete Message */}
-        {inningsComplete && !showInningsSwitch && (
-          <div className="backdrop-blur-xl bg-gradient-to-r from-green-500/20 to-blue-500/20 rounded-3xl border border-green-400/50 p-6 text-white space-y-4">
+        {!matchCompleted && inningsComplete && !showInningsSwitch && (
+          <div className="backdrop-blur-xl bg-linear-to-r from-green-500/20 to-blue-500/20 rounded-3xl border border-green-400/50 p-6 text-white space-y-4">
             <div className="flex items-center gap-3">
               <svg
                 className="w-6 h-6 text-green-400"
@@ -647,7 +929,7 @@ export default function MatchScorerPage() {
             </p>
             <button
               onClick={() => setShowInningsSwitch(true)}
-              className="w-full py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:shadow-lg transform hover:scale-[1.02] active:scale-[0.98] transition-all duration-200"
+              className="w-full py-3 bg-linear-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:shadow-lg transform hover:scale-[1.02] active:scale-[0.98] transition-all duration-200"
             >
               Switch to Second Innings
             </button>
@@ -655,7 +937,7 @@ export default function MatchScorerPage() {
         )}
 
         {/* Second Innings Opening Players Selection */}
-        {showInningsSwitch && (
+        {!matchCompleted && showInningsSwitch && (
           <div className="backdrop-blur-xl bg-white/10 rounded-3xl border border-white/20 p-6 text-white space-y-6">
             <div>
               <h3 className="text-xl font-semibold mb-2">Second Innings - Select Opening Players</h3>
@@ -743,7 +1025,7 @@ export default function MatchScorerPage() {
                   !secondInningsBowlerId ||
                   isSwitchingInnings
                 }
-                className="flex-1 px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-lg transform hover:scale-[1.02] active:scale-[0.98] transition-all duration-200"
+                className="flex-1 px-6 py-3 bg-linear-to-r from-purple-500 to-pink-500 rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:shadow-lg transform hover:scale-[1.02] active:scale-[0.98] transition-all duration-200"
               >
                 {isSwitchingInnings ? "Switching..." : "Start Second Innings"}
               </button>
@@ -752,7 +1034,7 @@ export default function MatchScorerPage() {
         )}
 
         {/* New Bowler Selection (After Over Completion) */}
-        {showBowlerSelector && !inningsComplete && (
+        {!matchCompleted && showBowlerSelector && !inningsComplete && (
           <div className="backdrop-blur-xl bg-white/10 rounded-3xl border border-white/20 p-6 text-white space-y-4">
             <p className="text-lg font-semibold">
               Over Complete! Select New Bowler
@@ -776,7 +1058,7 @@ export default function MatchScorerPage() {
               <button
                 onClick={handleNewBowlerSelect}
                 disabled={!newBowlerId || isUpdatingBowler}
-                className="px-6 py-3 bg-gradient-to-r from-purple-500 to-pink-500 rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                className="px-6 py-3 bg-linear-to-r from-purple-500 to-pink-500 rounded-xl font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isUpdatingBowler ? "Updating..." : "Confirm"}
               </button>
@@ -935,19 +1217,66 @@ export default function MatchScorerPage() {
             )}
           </div>
 
-          {/* Sidebar - Bowler Statistics */}
+          {/* Sidebar - Bowler & Batter Statistics */}
           <div className="lg:col-span-1">
-            <div className="sticky top-8">
+            <div className="sticky top-8 space-y-6">
               <BowlerStatsSidebar
                 bowlingTeamPlayers={bowlingTeam?.players ?? []}
                 playerStats={playerStats}
                 currentBowlerId={liveState?.bowler_id}
+              />
+              <BatterStatsSidebar
+                battingTeamPlayers={battingTeam?.players ?? []}
+                playerStats={playerStats}
+                strikerId={liveState?.striker_id}
+                nonStrikerId={liveState?.non_striker_id}
               />
             </div>
           </div>
         </div>
       </div>
     </div>
+
+      {showRematchModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
+          <div className="w-full max-w-md bg-slate-900/95 border border-white/10 rounded-3xl p-6 text-white space-y-4">
+            <div>
+              <h3 className="text-xl font-semibold mb-1">Rematch With Same Squads</h3>
+              <p className="text-white/70 text-sm">
+                Choose the number of overs for the rematch. Teams and players will remain the same.
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm text-white/80 mb-2">Overs per innings</label>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={rematchOvers}
+                onChange={(e) => setRematchOvers(parseInt(e.target.value) || 1)}
+                className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-xl text-white focus:outline-none focus:ring-2 focus:ring-purple-400"
+              />
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowRematchModal(false)}
+                disabled={isCreatingRematch}
+                className="flex-1 px-4 py-3 bg-white/10 border border-white/20 rounded-xl font-semibold hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleCreateRematch}
+                disabled={isCreatingRematch}
+                className="flex-1 px-4 py-3 bg-linear-to-r from-purple-500 to-pink-500 rounded-xl font-semibold hover:shadow-lg disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isCreatingRematch ? "Creating..." : "Create Rematch"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

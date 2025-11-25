@@ -7,8 +7,8 @@
  * Steps: Setup -> Squad A -> Squad B -> Toss -> Openers
  */
 
-import { useState, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useState, useEffect, useMemo } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { doc, onSnapshot, Unsubscribe } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import { useAuth } from "@/contexts/AuthContext";
@@ -28,6 +28,7 @@ import type {
   Player,
   MatchConfig,
 } from "@/types/cricket";
+import { MatchStatus } from "@/types/cricket";
 
 type Step = "setup" | "pool" | "squad-a" | "squad-b" | "toss" | "openers";
 
@@ -43,9 +44,12 @@ const STEP_LABELS: Record<Step, string> = {
 
 export default function NewMatchPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const rematchMatchId = searchParams.get("matchId");
+  const continuingExistingMatch = useMemo(() => !!rematchMatchId, [rematchMatchId]);
   const { user, loading: authLoading } = useAuth();
   const [currentStep, setCurrentStep] = useState<Step>("setup");
-  const [matchId, setMatchId] = useState<string | null>(null);
+  const [matchId, setMatchId] = useState<string | null>(rematchMatchId);
   const [matchData, setMatchData] = useState<Match | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -88,6 +92,38 @@ export default function NewMatchPage() {
     return () => unsubscribe();
   }, [matchId]);
 
+  useEffect(() => {
+    if (rematchMatchId && !matchId) {
+      setMatchId(rematchMatchId);
+    }
+  }, [rematchMatchId, matchId]);
+
+  useEffect(() => {
+    if (!matchData) return;
+    setTeamAName(matchData.teams.a.name);
+    setTeamBName(matchData.teams.b.name);
+    setTotalOvers(matchData.config.total_overs);
+  }, [matchData]);
+
+  useEffect(() => {
+    if (!continuingExistingMatch || !matchData) return;
+    if (!matchData.player_pool?.length) return;
+
+    if (!matchData.toss) {
+      setCurrentStep("toss");
+      return;
+    }
+
+    const hasOpeners =
+      !!matchData.live_state?.striker_id &&
+      !!matchData.live_state?.non_striker_id &&
+      !!matchData.live_state?.bowler_id;
+
+    if (!hasOpeners) {
+      setCurrentStep("openers");
+    }
+  }, [continuingExistingMatch, matchData]);
+
   // Redirect if not authenticated
   useEffect(() => {
     if (!authLoading && !user) {
@@ -97,6 +133,11 @@ export default function NewMatchPage() {
 
   // Handle Step 1: Create Match
   const handleCreateMatch = async () => {
+    if (continuingExistingMatch) {
+      setError("This match has already been created. Please continue from the remaining steps.");
+      return;
+    }
+
     if (!teamAName.trim() || !teamBName.trim()) {
       setError("Please enter both team names");
       return;
@@ -295,6 +336,11 @@ export default function NewMatchPage() {
           {/* Step 1: Setup */}
           {currentStep === "setup" && (
             <div className="space-y-6">
+              {continuingExistingMatch && (
+                <div className="p-4 bg-white/5 border border-white/20 rounded-xl text-white/80 text-sm">
+                  This match was pre-created for a rematch. Review the details below, then proceed to the Toss step.
+                </div>
+              )}
               <div>
                 <label className="block text-white/90 text-sm font-medium mb-2">
                   Team A Name
@@ -304,7 +350,8 @@ export default function NewMatchPage() {
                   value={teamAName}
                   onChange={(e) => setTeamAName(e.target.value)}
                   placeholder="Enter Team A name"
-                  className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all duration-300 backdrop-blur-sm"
+                  disabled={continuingExistingMatch}
+                  className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all duration-300 backdrop-blur-sm disabled:opacity-60 disabled:cursor-not-allowed"
                 />
               </div>
 
@@ -317,7 +364,8 @@ export default function NewMatchPage() {
                   value={teamBName}
                   onChange={(e) => setTeamBName(e.target.value)}
                   placeholder="Enter Team B name"
-                  className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all duration-300 backdrop-blur-sm"
+                  disabled={continuingExistingMatch}
+                  className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all duration-300 backdrop-blur-sm disabled:opacity-60 disabled:cursor-not-allowed"
                 />
               </div>
 
@@ -331,13 +379,19 @@ export default function NewMatchPage() {
                   onChange={(e) => setTotalOvers(parseInt(e.target.value) || 20)}
                   min="1"
                   max="50"
-                  className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all duration-300 backdrop-blur-sm"
+                  disabled={continuingExistingMatch}
+                  className="w-full px-4 py-3 bg-white/5 border border-white/20 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all duration-300 backdrop-blur-sm disabled:opacity-60 disabled:cursor-not-allowed"
                 />
               </div>
 
               <button
                 onClick={handleCreateMatch}
-                disabled={loading || !teamAName.trim() || !teamBName.trim()}
+                disabled={
+                  continuingExistingMatch ||
+                  loading ||
+                  !teamAName.trim() ||
+                  !teamBName.trim()
+                }
                 className="w-full py-3.5 bg-gradient-to-r from-purple-500 to-pink-500 text-white font-semibold rounded-xl shadow-lg hover:shadow-xl transform hover:scale-[1.02] active:scale-[0.98] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none flex items-center justify-center gap-2"
               >
                 {loading ? (

@@ -139,6 +139,19 @@ export interface MatchLiveState {
   last_ball_id?: string;
   last_bowler_id?: string; // Player ID of the bowler who just completed an over (prevents consecutive overs)
   first_innings_total?: number; // Total runs scored in first innings (for RRR calculation in second innings)
+  current_innings?: 1 | 2; // Tracks which innings is currently active
+  first_batting_team_id?: TeamId; // Team that batted first (sets the target)
+  second_batting_team_id?: TeamId; // Team currently batting second / chasing
+}
+
+export interface MatchResult {
+  type: "win" | "tie";
+  winner_team_id?: TeamId;
+  loser_team_id?: TeamId;
+  margin?: string;
+  summary: string;
+  first_innings_runs: number;
+  second_innings_runs: number;
 }
 
 /**
@@ -158,6 +171,7 @@ export interface Match {
   };
   toss: TossResult | null; // Toss result (null if toss not done yet)
   live_state: MatchLiveState; // Current live state (denormalized for fast reads)
+  result?: MatchResult; // Final result details when match is completed
   created_at: number; // Timestamp when match was created
   updated_at: number; // Timestamp when match was last updated
 }

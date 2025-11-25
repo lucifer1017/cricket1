@@ -8,6 +8,7 @@ import {
   getDocs,
   getDoc,
   serverTimestamp,
+  deleteField,
 } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
 import type {
@@ -15,7 +16,9 @@ import type {
   BallInput,
   Match,
   MatchLiveState,
+  MatchResult,
   OverBall,
+  TeamId,
 } from "@/types/cricket";
 import { ExtraType, MatchStatus, WicketType } from "@/types/cricket";
 
@@ -247,14 +250,97 @@ export async function recordBall(
       overEntry,
     ].slice(-6);
 
+    const matchResultPayload: MatchResult | null = (() => {
+      const isSecondInnings = liveState.current_innings === 2;
+      const firstInningsRuns = liveState.first_innings_total;
+      if (!isSecondInnings || firstInningsRuns == null) {
+        return null;
+      }
+
+      const target = firstInningsRuns + 1;
+      const chasingRuns = liveState.score.runs;
+      const wicketsLost = liveState.score.wickets;
+      const wicketsRemaining = Math.max(0, 10 - wicketsLost);
+      const totalBalls = matchData.config.total_overs * 6;
+      const ballsBowled =
+        liveState.score.overs * 6 + liveState.score.balls;
+      const ballsRemaining = Math.max(0, totalBalls - ballsBowled);
+      const chasingTeamId =
+        (liveState.second_batting_team_id ??
+          liveState.batting_team_id) as TeamId | undefined;
+      const defendingTeamId =
+        (liveState.first_batting_team_id ??
+          liveState.bowling_team_id) as TeamId | undefined;
+
+      const chasingTeamName = chasingTeamId
+        ? matchData.teams[chasingTeamId].name
+        : "Chasing team";
+      const defendingTeamName = defendingTeamId
+        ? matchData.teams[defendingTeamId].name
+        : "Defending team";
+
+      const oversComplete =
+        liveState.score.overs >= matchData.config.total_overs &&
+        liveState.score.balls === 0;
+      const allOut = wicketsLost >= 10;
+
+      if (chasingRuns >= target) {
+        const margin =
+          wicketsRemaining > 0
+            ? `${wicketsRemaining} wicket${wicketsRemaining === 1 ? "" : "s"}`
+            : `${ballsRemaining} ball${ballsRemaining === 1 ? "" : "s"}`;
+        return {
+          type: "win",
+          winner_team_id: chasingTeamId,
+          loser_team_id: defendingTeamId,
+          margin,
+          summary: `${chasingTeamName} won by ${margin}`,
+          first_innings_runs: firstInningsRuns,
+          second_innings_runs: chasingRuns,
+        };
+      }
+
+      if (allOut || oversComplete) {
+        if (chasingRuns === firstInningsRuns) {
+          return {
+            type: "tie",
+            summary: `Match tied! Both teams scored ${chasingRuns} runs`,
+            first_innings_runs: firstInningsRuns,
+            second_innings_runs: chasingRuns,
+          };
+        }
+
+        const margin = firstInningsRuns - chasingRuns;
+        return {
+          type: "win",
+          winner_team_id: defendingTeamId,
+          loser_team_id: chasingTeamId,
+          margin: `${margin} run${margin === 1 ? "" : "s"}`,
+          summary: `${defendingTeamName} won by ${margin} run${margin === 1 ? "" : "s"}`,
+          first_innings_runs: firstInningsRuns,
+          second_innings_runs: chasingRuns,
+        };
+      }
+
+      return null;
+    })();
+
     transaction.set(ballDoc, {
       ...ballEvent,
       timestamp: serverTimestamp(),
     });
-    transaction.update(matchRef, {
+
+    const updatePayload: Record<string, unknown> = {
       live_state: liveState,
       updated_at: serverTimestamp(),
-    });
+    };
+
+    if (matchResultPayload) {
+      updatePayload.status = MatchStatus.COMPLETED;
+      updatePayload.result = matchResultPayload;
+    }
+
+    transaction.update(matchRef, updatePayload);
   });
 }
 
@@ -300,6 +386,8 @@ export async function undoLastBall(matchId: string): Promise<void> {
 
     transaction.update(matchRef, {
       live_state: restoredState,
+      status: MatchStatus.LIVE,
+      result: deleteField(),
       updated_at: serverTimestamp(),
     });
 
