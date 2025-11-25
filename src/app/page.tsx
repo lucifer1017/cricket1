@@ -89,7 +89,8 @@ export default function Home() {
     return null;
   }
 
-  const displayName = user.displayName || user.email?.split("@")[0] || "User";
+  const displayName =
+    user?.displayName || user?.email?.split("@")[0] || "User";
 
   return (
     <div className="min-h-screen bg-linear-to-br from-indigo-900 via-purple-900 to-pink-900 relative overflow-hidden">
