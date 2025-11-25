@@ -112,6 +112,31 @@ export async function recordBall(
     const liveState = deepCloneState(matchData.live_state);
     const score = { ...liveState.score };
     const playerStats = clonePlayerStats(liveState.player_stats);
+    const battingTeamId = liveState.batting_team_id as TeamId | undefined;
+    const battingTeam =
+      battingTeamId != null ? matchData.teams[battingTeamId] : undefined;
+    const battingTeamSize = battingTeam?.players.length ?? 0;
+    const maxWicketsBeforeAllOut = Math.max(battingTeamSize - 1, 0);
+    const dismissedBatters = new Set(liveState.dismissed_batter_ids ?? []);
+    liveState.dismissed_batter_ids = Array.from(dismissedBatters);
+
+    if (
+      maxWicketsBeforeAllOut > 0 &&
+      score.wickets >= maxWicketsBeforeAllOut
+    ) {
+      throw new Error(
+        "Innings complete. All available batters have been dismissed."
+      );
+    }
+
+    const ensureBatterEligible = (batterId?: string | null, label = "Batter") => {
+      if (batterId && dismissedBatters.has(batterId)) {
+        throw new Error(`${label} has already been dismissed. Please select a new batter.`);
+      }
+    };
+
+    ensureBatterEligible(liveState.striker_id, "Striker");
+    ensureBatterEligible(liveState.non_striker_id, "Non-striker");
 
     // VALIDATION: Prevent recording if innings is complete (reached total overs limit)
     const totalOvers = matchData.config?.total_overs ?? 0;
@@ -143,7 +168,11 @@ export async function recordBall(
     score.runs += totalRuns;
 
     if (ballInput.wicket?.player_id) {
+      if (dismissedBatters.has(ballInput.wicket.player_id)) {
+        throw new Error("This batter has already been dismissed.");
+      }
       score.wickets += 1;
+      dismissedBatters.add(ballInput.wicket.player_id);
     }
 
     let overCompleted = false;
@@ -211,6 +240,7 @@ export async function recordBall(
       } else {
         liveState.non_striker_id = "";
       }
+      liveState.dismissed_batter_ids = Array.from(dismissedBatters);
     }
 
     const shouldRotate =
@@ -280,17 +310,22 @@ export async function recordBall(
       const target = firstInningsRuns + 1;
       const chasingRuns = liveState.score.runs;
       const wicketsLost = liveState.score.wickets;
-      const wicketsRemaining = Math.max(0, 10 - wicketsLost);
-      const totalBalls = matchData.config.total_overs * 6;
-      const ballsBowled =
-        liveState.score.overs * 6 + liveState.score.balls;
-      const ballsRemaining = Math.max(0, totalBalls - ballsBowled);
       const chasingTeamId =
         (liveState.second_batting_team_id ??
           liveState.batting_team_id) as TeamId | undefined;
       const defendingTeamId =
         (liveState.first_batting_team_id ??
           liveState.bowling_team_id) as TeamId | undefined;
+      const chasingTeamData = chasingTeamId
+        ? matchData.teams[chasingTeamId]
+        : undefined;
+      const chasingTeamSize = chasingTeamData?.players.length ?? 0;
+      const maxChasingWickets = Math.max(chasingTeamSize - 1, 1);
+      const wicketsRemaining = Math.max(0, maxChasingWickets - wicketsLost);
+      const totalBalls = matchData.config.total_overs * 6;
+      const ballsBowled =
+        liveState.score.overs * 6 + liveState.score.balls;
+      const ballsRemaining = Math.max(0, totalBalls - ballsBowled);
 
       const chasingTeamName = chasingTeamId
         ? matchData.teams[chasingTeamId].name
@@ -302,7 +337,7 @@ export async function recordBall(
       const oversComplete =
         liveState.score.overs >= matchData.config.total_overs &&
         liveState.score.balls === 0;
-      const allOut = wicketsLost >= 10;
+      const allOut = wicketsRemaining === 0;
 
       if (chasingRuns >= target) {
         const margin =

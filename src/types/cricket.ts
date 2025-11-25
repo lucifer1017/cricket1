@@ -138,6 +138,7 @@ export interface MatchLiveState {
   is_free_hit?: boolean;
   last_ball_id?: string;
   last_bowler_id?: string; // Player ID of the bowler who just completed an over (prevents consecutive overs)
+  dismissed_batter_ids?: string[]; // Tracks batters who have been dismissed (prevents re-selection)
   first_innings_total?: number; // Total runs scored in first innings (for RRR calculation in second innings)
   current_innings?: 1 | 2; // Tracks which innings is currently active
   first_batting_team_id?: TeamId; // Team that batted first (sets the target)

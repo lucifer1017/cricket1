@@ -274,6 +274,7 @@ export async function createMatch(data: CreateMatchInput): Promise<string> {
       bowler_id: "", // Will be set when match starts
       score: defaultScore,
       this_over: [], // Empty array for current over
+      dismissed_batter_ids: [],
     };
 
     const newMatch: Omit<Match, "id"> = {
@@ -686,6 +687,7 @@ export async function switchToSecondInnings(
         batters: {},
         bowlers: {},
       },
+      "live_state.dismissed_batter_ids": [],
       "live_state.this_over": [],
       "live_state.is_free_hit": false,
       "live_state.last_bowler_id": deleteField(),
@@ -763,6 +765,7 @@ export async function createRematchWithSameSquads(
       player_stats: { batters: {}, bowlers: {} },
       is_free_hit: false,
       current_innings: 1,
+      dismissed_batter_ids: [],
     },
     created_at: now,
     updated_at: now,
