@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function ownsMatch(data) {
+      return data.owner_id == request.auth.uid;
+    }
+
+    function isAuthorizedMatchData(data) {
+      return ownsMatch(data) ||
+        (data.authorized_user_ids != null &&
+          request.auth.uid in data.authorized_user_ids);
+    }
+
+    function matchDoc(matchId) {
+      return get(/databases/$(database)/documents/matches/$(matchId));
+    }
+
+    function canAccessMatch(matchId) {
+      let doc = matchDoc(matchId);
+      return doc.exists && isAuthorizedMatchData(doc.data);
+    }
+
+    match /players/{playerId} {
+      allow read: if true;
+      allow create, update, delete: if isSignedIn();
+    }
+
+    match /matches/{matchId} {
+      allow create: if isSignedIn() && ownsMatch(request.resource.data);
+      allow read, update, delete: if isSignedIn() && isAuthorizedMatchData(resource.data);
+
+      match /innings/{inningsId} {
+        match /balls/{ballId} {
+          allow read, write: if isSignedIn() && canAccessMatch(matchId);
+        }
+      }
+    }
+  }
+}
+

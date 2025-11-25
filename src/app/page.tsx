@@ -12,9 +12,11 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
+import { signOut } from "firebase/auth";
 import { useAuth } from "@/contexts/AuthContext";
 import { getActiveMatch } from "@/lib/firebase/matches";
 import type { Match } from "@/types/cricket";
+import { auth } from "@/lib/firebase/config";
 
 export default function Home() {
   const router = useRouter();
@@ -34,7 +36,7 @@ export default function Home() {
       }
 
       try {
-        const match = await getActiveMatch();
+        const match = await getActiveMatch(user.uid);
         setActiveMatch(match);
       } catch (err) {
         console.error("Error fetching active match:", err);
@@ -47,6 +49,12 @@ export default function Home() {
     fetchActiveMatch();
   }, [user, authLoading]);
 
+  useEffect(() => {
+    if (!authLoading && !user) {
+      router.replace("/auth");
+    }
+  }, [authLoading, user, router]);
+
   const handleResumeMatch = () => {
     if (activeMatch) {
       router.push(`/match/${activeMatch.id}`);
@@ -55,6 +63,16 @@ export default function Home() {
 
   const handleStartNewMatch = () => {
     router.push("/match/new");
+  };
+
+  const handleSignOut = async () => {
+    try {
+      await signOut(auth);
+      router.push("/auth");
+    } catch (err) {
+      console.error("Sign out failed:", err);
+      setError("Failed to sign out. Please try again.");
+    }
   };
 
   // Show loading state
@@ -66,9 +84,8 @@ export default function Home() {
     );
   }
 
-  // Redirect to auth if not logged in
-  if (!user) {
-    router.push("/auth");
+  // Redirect placeholder while router navigates
+  if (!authLoading && !user) {
     return null;
   }
 
@@ -86,13 +103,21 @@ export default function Home() {
       <div className="relative z-10 min-h-screen py-12 px-4">
         <div className="max-w-6xl mx-auto">
           {/* Header */}
-          <div className="text-center mb-12">
-            <h1 className="text-5xl font-bold text-white mb-3 tracking-tight">
-              Welcome back, {displayName}!
-            </h1>
-            <p className="text-white/70 text-lg">
-              Manage your cricket matches and track scores in real-time
-            </p>
+          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 mb-12">
+            <div className="text-center lg:text-left">
+              <h1 className="text-5xl font-bold text-white mb-3 tracking-tight">
+                Welcome back, {displayName}!
+              </h1>
+              <p className="text-white/70 text-lg">
+                Manage your cricket matches and track scores in real-time
+              </p>
+            </div>
+            <button
+              onClick={handleSignOut}
+              className="self-center lg:self-auto px-5 py-3 bg-white/10 border border-white/30 rounded-2xl text-white text-sm font-semibold hover:bg-white/20 transition-colors duration-200 backdrop-blur"
+            >
+              Sign Out
+            </button>
           </div>
 
           {/* Error Message */}

@@ -162,6 +162,7 @@ export interface MatchResult {
 export interface Match {
   id: string; // Firestore document ID
   owner_id: string; // User UID who created this match
+  authorized_user_ids?: string[]; // Additional users permitted to score/watch privately
   status: MatchStatus; // Current match status
   config: MatchConfig; // Match configuration (overs, rules)
   player_pool: Player[]; // Players available for this match

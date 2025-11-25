@@ -46,6 +46,39 @@ import { MatchStatus } from "@/types/cricket";
 const playersCollection = () => collection(db, "players");
 const matchesCollection = () => collection(db, "matches");
 
+const ensureAuthenticatedUser = () => {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    throw new Error("You must be logged in to perform this action");
+  }
+  return currentUser;
+};
+
+const userHasMatchAccess = (match: Match, uid: string): boolean =>
+  match.owner_id === uid ||
+  (match.authorized_user_ids?.includes(uid) ?? false);
+
+const assertMatchAccess = (match: Match, uid: string) => {
+  if (!userHasMatchAccess(match, uid)) {
+    throw new Error("You do not have permission to access this match");
+  }
+};
+
+const loadMatchForUpdate = async (matchId: string) => {
+  const currentUser = ensureAuthenticatedUser();
+  const matchRef = doc(db, "matches", matchId);
+  const matchSnap = await getDoc(matchRef);
+
+  if (!matchSnap.exists()) {
+    throw new Error("Match not found");
+  }
+
+  const matchData = matchSnap.data() as Match;
+  assertMatchAccess(matchData, currentUser.uid);
+
+  return { matchRef, matchData, currentUser };
+};
+
 // ============================================================================
 // A. PLAYER POOL MANAGEMENT
 // ============================================================================
@@ -154,12 +187,14 @@ export async function createPlayer(name: string): Promise<Player> {
  * 
  * @returns The active Match object, or null if no live match exists
  */
-export async function getActiveMatch(): Promise<Match | null> {
+export async function getActiveMatch(userId?: string): Promise<Match | null> {
   try {
+    const resolvedUid = userId ?? ensureAuthenticatedUser().uid;
     const matchesRef = matchesCollection();
     const q = query(
       matchesRef,
-      where("status", "==", "live")
+      where("status", "==", "live"),
+      where("owner_id", "==", resolvedUid)
     );
 
     const querySnapshot = await getDocs(q);
@@ -170,10 +205,12 @@ export async function getActiveMatch(): Promise<Match | null> {
 
     // Should only be one live match (singleton rule)
     const matchDoc = querySnapshot.docs[0];
-    return {
+    const match = {
       id: matchDoc.id,
       ...matchDoc.data(),
     } as Match;
+    assertMatchAccess(match, resolvedUid);
+    return match;
   } catch (error) {
     console.error("Error getting active match:", error);
     throw new Error("Failed to retrieve active match. Please try again.");
@@ -196,17 +233,14 @@ export async function getActiveMatch(): Promise<Match | null> {
  */
 export async function createMatch(data: CreateMatchInput): Promise<string> {
   try {
-    // Step 1: Check for active match (singleton rule)
-    const activeMatch = await getActiveMatch();
+    const currentUser = ensureAuthenticatedUser();
+    const activeMatch = await getActiveMatch(currentUser.uid);
     if (activeMatch) {
-      throw new Error("A match is already in progress. Please complete or abandon it first.");
+      throw new Error("You already have a match in progress. Please complete or abandon it first.");
     }
 
-    // Step 2: Get current user
-    const currentUser = auth.currentUser;
-    if (!currentUser) {
-      throw new Error("You must be logged in to create a match");
-    }
+    // Step 1: Check for active match (singleton rule)
+    // (Now per-owner rather than global, implemented above)
 
     // Step 3: Construct initial Match object
     const now = Date.now();
@@ -244,6 +278,7 @@ export async function createMatch(data: CreateMatchInput): Promise<string> {
 
     const newMatch: Omit<Match, "id"> = {
       owner_id: currentUser.uid,
+      authorized_user_ids: [currentUser.uid],
       status: MatchStatus.SCHEDULED,
       config: data.config,
       player_pool: [],
@@ -299,12 +334,7 @@ export async function updateToss(
   toss: TossInput
 ): Promise<void> {
   try {
-    const matchRef = doc(db, "matches", matchId);
-    const matchSnap = await getDoc(matchRef);
-
-    if (!matchSnap.exists()) {
-      throw new Error("Match not found");
-    }
+    const { matchRef } = await loadMatchForUpdate(matchId);
 
     // Determine batting and bowling teams based on toss
     let battingTeamId: "a" | "b";
@@ -361,14 +391,7 @@ export async function addPlayerToSquad(
   player: Player
 ): Promise<void> {
   try {
-    const matchRef = doc(db, "matches", matchId);
-    const matchSnap = await getDoc(matchRef);
-
-    if (!matchSnap.exists()) {
-      throw new Error("Match not found");
-    }
-
-    const matchData = matchSnap.data() as Match;
+    const { matchRef, matchData } = await loadMatchForUpdate(matchId);
 
     // Validate match is not completed or abandoned
     if (
@@ -428,14 +451,7 @@ export async function addPlayerToPool(
   player: Player
 ): Promise<void> {
   try {
-    const matchRef = doc(db, "matches", matchId);
-    const matchSnap = await getDoc(matchRef);
-
-    if (!matchSnap.exists()) {
-      throw new Error("Match not found");
-    }
-
-    const matchData = matchSnap.data() as Match;
+    const { matchRef, matchData } = await loadMatchForUpdate(matchId);
 
     // Prevent duplicates in the pool
     const alreadyInPool = matchData.player_pool.some(
@@ -467,14 +483,7 @@ export async function removePlayerFromPool(
   playerId: string
 ): Promise<void> {
   try {
-    const matchRef = doc(db, "matches", matchId);
-    const matchSnap = await getDoc(matchRef);
-
-    if (!matchSnap.exists()) {
-      throw new Error("Match not found");
-    }
-
-    const matchData = matchSnap.data() as Match;
+    const { matchRef, matchData } = await loadMatchForUpdate(matchId);
     const playerExists = matchData.player_pool.some(
       (player) => player.id === playerId
     );
@@ -520,14 +529,7 @@ export async function removePlayerFromSquad(
   playerId: string
 ): Promise<void> {
   try {
-    const matchRef = doc(db, "matches", matchId);
-    const matchSnap = await getDoc(matchRef);
-
-    if (!matchSnap.exists()) {
-      throw new Error("Match not found");
-    }
-
-    const matchData = matchSnap.data() as Match;
+    const { matchRef, matchData } = await loadMatchForUpdate(matchId);
 
     if (
       matchData.status === MatchStatus.COMPLETED ||
@@ -577,14 +579,7 @@ export async function startMatch(
   openers: OpeningPlayersInput
 ): Promise<void> {
   try {
-    const matchRef = doc(db, "matches", matchId);
-    const matchSnap = await getDoc(matchRef);
-
-    if (!matchSnap.exists()) {
-      throw new Error("Match not found");
-    }
-
-    const matchData = matchSnap.data() as Match;
+    const { matchRef, matchData } = await loadMatchForUpdate(matchId);
 
     // Validate match is in correct state
     if (matchData.status !== MatchStatus.SCHEDULED) {
@@ -638,14 +633,7 @@ export async function switchToSecondInnings(
   openers: OpeningPlayersInput
 ): Promise<void> {
   try {
-    const matchRef = doc(db, "matches", matchId);
-    const matchSnap = await getDoc(matchRef);
-
-    if (!matchSnap.exists()) {
-      throw new Error("Match not found");
-    }
-
-    const matchData = matchSnap.data() as Match;
+    const { matchRef, matchData } = await loadMatchForUpdate(matchId);
 
     // Validate match is live
     if (matchData.status !== MatchStatus.LIVE) {
@@ -729,14 +717,7 @@ export async function createRematchWithSameSquads(
     throw new Error("Overs must be between 1 and 50");
   }
 
-  const matchRef = doc(db, "matches", matchId);
-  const matchSnap = await getDoc(matchRef);
-
-  if (!matchSnap.exists()) {
-    throw new Error("Match not found");
-  }
-
-  const matchData = matchSnap.data() as Match;
+  const { matchData } = await loadMatchForUpdate(matchId);
 
   if (matchData.status !== MatchStatus.COMPLETED) {
     throw new Error("Match must be completed before starting a rematch");
@@ -747,6 +728,10 @@ export async function createRematchWithSameSquads(
 
   const newMatch: Omit<Match, "id"> = {
     owner_id: matchData.owner_id,
+    authorized_user_ids:
+      matchData.authorized_user_ids?.length
+        ? Array.from(new Set(matchData.authorized_user_ids))
+        : [matchData.owner_id],
     status: MatchStatus.SCHEDULED,
     config: {
       ...matchData.config,
@@ -806,14 +791,7 @@ export async function createRematchWithSameSquads(
  */
 export async function endMatch(matchId: string): Promise<void> {
   try {
-    const matchRef = doc(db, "matches", matchId);
-    const matchSnap = await getDoc(matchRef);
-
-    if (!matchSnap.exists()) {
-      throw new Error("Match not found");
-    }
-
-    const matchData = matchSnap.data() as Match;
+    const { matchRef, matchData } = await loadMatchForUpdate(matchId);
 
     // Validate match is live
     if (matchData.status !== MatchStatus.LIVE) {
@@ -848,6 +826,7 @@ export async function endMatch(matchId: string): Promise<void> {
  */
 export async function getMatchById(matchId: string): Promise<Match | null> {
   try {
+    const currentUser = ensureAuthenticatedUser();
     const matchRef = doc(db, "matches", matchId);
     const matchSnap = await getDoc(matchRef);
 
@@ -855,10 +834,12 @@ export async function getMatchById(matchId: string): Promise<Match | null> {
       return null;
     }
 
-    return {
+    const match = {
       id: matchSnap.id,
       ...matchSnap.data(),
     } as Match;
+    assertMatchAccess(match, currentUser.uid);
+    return match;
   } catch (error) {
     console.error("Error getting match by ID:", error);
     throw new Error("Failed to retrieve match. Please try again.");

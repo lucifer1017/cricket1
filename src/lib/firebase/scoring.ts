@@ -10,7 +10,7 @@ import {
   serverTimestamp,
   deleteField,
 } from "firebase/firestore";
-import { db } from "@/lib/firebase/config";
+import { auth, db } from "@/lib/firebase/config";
 import type {
   BallEvent,
   BallInput,
@@ -47,6 +47,23 @@ const getBallsCollection = (matchId: string, inningsId: string) =>
 const deepCloneState = (state: MatchLiveState): MatchLiveState =>
   JSON.parse(JSON.stringify(state));
 
+const requireAuthenticatedUser = () => {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    throw new Error("You must be logged in to score this match.");
+  }
+  return currentUser;
+};
+
+const assertScoringAccess = (match: Match, uid: string) => {
+  const isOwner = match.owner_id === uid;
+  const isAuthorized =
+    match.authorized_user_ids?.includes(uid) ?? false;
+  if (!isOwner && !isAuthorized) {
+    throw new Error("You do not have permission to score this match.");
+  }
+};
+
 export const calculateRuns = (ballInput: BallInput): number => {
   const extrasRuns = ballInput.extras?.runs ?? 0;
   return ballInput.runs_off_bat + extrasRuns;
@@ -73,6 +90,8 @@ export async function recordBall(
   matchId: string,
   ballInput: BallInput
 ): Promise<void> {
+  const currentUser = requireAuthenticatedUser();
+
   await runTransaction(db, async (transaction) => {
     const matchRef = doc(db, "matches", matchId);
     const matchSnap = await transaction.get(matchRef);
@@ -82,6 +101,7 @@ export async function recordBall(
     }
 
     const matchData = matchSnap.data() as Match;
+    assertScoringAccess(matchData, currentUser.uid);
 
     if (matchData.status !== MatchStatus.LIVE) {
       throw new Error("Match is not live. Cannot record ball.");
@@ -345,6 +365,7 @@ export async function recordBall(
 }
 
 export async function undoLastBall(matchId: string): Promise<void> {
+  const currentUser = requireAuthenticatedUser();
   const matchRef = doc(db, "matches", matchId);
   const matchSnap = await getDoc(matchRef);
 
@@ -353,6 +374,7 @@ export async function undoLastBall(matchId: string): Promise<void> {
   }
 
   const matchData = matchSnap.data() as Match;
+  assertScoringAccess(matchData, currentUser.uid);
   const inningsId = getInningsId(matchData);
   const ballsCollection = getBallsCollection(matchId, inningsId);
   const lastBallQuery = query(
@@ -377,6 +399,8 @@ export async function undoLastBall(matchId: string): Promise<void> {
       throw new Error("Match not found.");
     }
 
+    const latestMatchData = matchSnap.data() as Match;
+    assertScoringAccess(latestMatchData, currentUser.uid);
     const ballSnap = await transaction.get(lastBallDoc.ref);
 
     if (!ballSnap.exists()) {
