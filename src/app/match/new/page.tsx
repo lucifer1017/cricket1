@@ -7,7 +7,7 @@
  * Steps: Setup -> Squad A -> Squad B -> Toss -> Openers
  */
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { doc, onSnapshot, Unsubscribe } from "firebase/firestore";
 import { db } from "@/lib/firebase/config";
@@ -42,7 +42,7 @@ const STEP_LABELS: Record<Step, string> = {
   openers: "Opening Players",
 };
 
-export default function NewMatchPage() {
+function MatchSetupWizard() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const rematchMatchId = searchParams.get("matchId");
@@ -755,6 +755,20 @@ export default function NewMatchPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function NewMatchPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="min-h-screen flex items-center justify-center bg-linear-to-br from-indigo-900 via-purple-900 to-pink-900 text-white">
+          <p className="text-lg font-semibold">Loading match setup...</p>
+        </div>
+      }
+    >
+      <MatchSetupWizard />
+    </Suspense>
   );
 }
 

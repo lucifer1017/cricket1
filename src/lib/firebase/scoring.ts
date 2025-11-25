@@ -345,7 +345,16 @@ export async function recordBall(
 }
 
 export async function undoLastBall(matchId: string): Promise<void> {
-  const ballsCollection = getBallsCollection(matchId);
+  const matchRef = doc(db, "matches", matchId);
+  const matchSnap = await getDoc(matchRef);
+
+  if (!matchSnap.exists()) {
+    throw new Error("Match not found.");
+  }
+
+  const matchData = matchSnap.data() as Match;
+  const inningsId = getInningsId(matchData);
+  const ballsCollection = getBallsCollection(matchId, inningsId);
   const lastBallQuery = query(
     ballsCollection,
     orderBy("timestamp", "desc"),
